@@ -43,24 +43,140 @@ df = pd.read_csv(DATA_PATH)
 
 
 # ---------------------------------------------------------------------------
-# ESTADO DE ARRANQUE: los dos endpoints estan por escribir.
-#
-# app.py ya descubre este modulo y registra su blueprint, y /api/health ya
-# responde. Lo que falta son los dos endpoints que alimentan el tablero.
+# Endpoints del tablero
 # ---------------------------------------------------------------------------
 
+FEATURE_COLUMNS = [
+    "GrLivArea",
+    "OverallQual",
+    "YearBuilt",
+    "TotalBsmtSF",
+    "GarageCars",
+    "FullBath",
+    "BedroomAbvGr",
+    "Neighborhood",
+    "LotArea",
+    "KitchenQual",
+]
+TARGET_COLUMN = "SalePrice"
+EXPOSED_COLUMNS = ["Id"] + FEATURE_COLUMNS + [TARGET_COLUMN]
 
-# TODO sesion 1: GET /api/stats
-#
-# Devuelve los agregados del dataset. Alimenta las graficas del tablero.
-# El contrato exacto esta en docs/api-contrato.md.
-#
-# Acepta un parametro opcional neighborhood que acota count, target y
-# by_overall_qual. by_neighborhood se queda global a proposito: es el eje de
-# comparacion, y filtrarlo a una sola colonia lo dejaria sin sentido.
+DEFAULT_LIMIT = 20
+MAX_LIMIT = 200
 
 
-# TODO sesion 1: GET /api/data
-#
-# Devuelve registros individuales, con filtro opcional por colonia y un limite.
-# Un filtro sin coincidencias NO es un error: responde 200 con lista vacia.
+def _redondear(v):
+    if pd.isna(v):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    return v
+
+
+@bp.get("/api/stats")
+def stats():
+    """Agregados del dataset para el tablero."""
+    neighborhood = request.args.get("neighborhood", "").strip()
+    alcance = df if not neighborhood else df[df["Neighborhood"] == neighborhood]
+
+    if neighborhood and alcance.empty:
+        return jsonify(
+            {
+                "count": 0,
+                "scope": neighborhood,
+                "target": None,
+                "by_neighborhood": [
+                    {
+                        "neighborhood": row["Neighborhood"],
+                        "count": int(row["count"]),
+                        "mean_price": float(row["mean_price"]),
+                    }
+                    for row in (
+                        df.groupby("Neighborhood")["SalePrice"]
+                        .agg(["count", "mean"])
+                        .reset_index()
+                        .rename(columns={"mean": "mean_price"})
+                        .sort_values("mean_price", ascending=False)
+                        .to_dict(orient="records")
+                    )
+                ],
+                "by_overall_qual": [],
+            }
+        )
+
+    by_neighborhood = (
+        df.groupby("Neighborhood")["SalePrice"]
+        .agg(["count", "mean"])
+        .reset_index()
+        .rename(columns={"mean": "mean_price"})
+        .sort_values("mean_price", ascending=False)
+    )
+
+    by_overall_qual = (
+        alcance.groupby("OverallQual")["SalePrice"]
+        .agg(["count", "mean"])
+        .reset_index()
+        .rename(columns={"mean": "mean_price"})
+        .sort_values("OverallQual", ascending=True)
+    )
+
+    response = {
+        "count": int(len(alcance)),
+        "scope": neighborhood or None,
+        "target": None,
+        "by_neighborhood": [
+            {
+                "neighborhood": row["Neighborhood"],
+                "count": int(row["count"]),
+                "mean_price": float(row["mean_price"]),
+            }
+            for row in by_neighborhood.to_dict(orient="records")
+        ],
+        "by_overall_qual": [
+            {
+                "overall_qual": int(row["OverallQual"]),
+                "count": int(row["count"]),
+                "mean_price": float(row["mean_price"]),
+            }
+            for row in by_overall_qual.to_dict(orient="records")
+        ],
+    }
+
+    if not alcance.empty:
+        target = alcance[TARGET_COLUMN]
+        response["target"] = {
+            "name": TARGET_COLUMN,
+            "min": float(target.min()),
+            "mean": float(target.mean()),
+            "median": float(target.median()),
+            "max": float(target.max()),
+        }
+
+    return jsonify(response)
+
+
+@bp.get("/api/data")
+def data():
+    """Registros individuales con filtro opcional por colonia y limite."""
+    neighborhood = request.args.get("neighborhood", "").strip()
+    try:
+        limite = int(request.args.get("limit", DEFAULT_LIMIT))
+    except ValueError:
+        limite = DEFAULT_LIMIT
+    limite = max(1, min(limite, MAX_LIMIT))
+
+    filtrado = df if not neighborhood else df[df["Neighborhood"] == neighborhood]
+    filas = filtrado.head(limite)
+
+    return jsonify(
+        {
+            "count": int(len(filas)),
+            "total_matching": int(len(filtrado)),
+            "rows": filas[EXPOSED_COLUMNS].where(pd.notna(filas[EXPOSED_COLUMNS]), None).to_dict(orient="records"),
+        }
+    )
+
+
+def estado():
+    """Lo que este modulo aporta a /api/health."""
+    return {"filas_en_datos": int(len(df)), "target": TARGET_COLUMN}
